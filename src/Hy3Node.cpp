@@ -33,7 +33,10 @@ Hy3GroupNode::Hy3GroupNode(Hy3GroupLayout layout): layout(layout) {
 // "hl.dsp.window.tag(...)"` would take, targeting the window by address so it
 // works regardless of focus.
 static void applyHy3Tag(PHLWINDOW window, const char* tag, bool add) {
-	if (!window) return;
+	if (!window) {
+		hy3_log(ERR, "[hy3tags] applyHy3Tag called with null window, tag={}", tag);
+		return;
+	}
 
 	auto args = std::format(
 	    "hl.dsp.window.tag({{ tag = \"{}{}\", window = \"address:0x{:x}\" }})",
@@ -42,7 +45,8 @@ static void applyHy3Tag(PHLWINDOW window, const char* tag, bool add) {
 	    (uintptr_t) window.get()
 	);
 
-	HyprlandAPI::invokeHyprctlCommand("dispatch", args);
+	auto result = HyprlandAPI::invokeHyprctlCommand("dispatch", args);
+	hy3_log(LOG, "[hy3tags] args=\"{}\" result=\"{}\"", args, result);
 }
 
 void Hy3Node::syncHy3Tags() {
@@ -50,8 +54,10 @@ void Hy3Node::syncHy3Tags() {
 	case Hy3NodeType::Target: {
 		bool grouped = false;
 		bool tabbed = false;
+		bool has_parent = false;
 
 		if (auto parent = this->parent.lock()) {
+			has_parent = true;
 			auto& pgroup = parent->as_group();
 			tabbed = pgroup.isTab();
 			// The workspace's implicit top-level split container (created
@@ -60,6 +66,15 @@ void Hy3Node::syncHy3Tags() {
 			// explicitly created/nested groups do.
 			grouped = !parent->is_root() && !parent->is_root_group();
 		}
+
+		hy3_log(
+		    LOG,
+		    "[hy3tags] syncHy3Tags Target node={:x} has_parent={} grouped={} tabbed={}",
+		    (uintptr_t) this,
+		    has_parent,
+		    grouped,
+		    tabbed
+		);
 
 		applyHy3Tag(this->as_window(), "hy3_grouped", grouped);
 		applyHy3Tag(this->as_window(), "hy3_tabbed", tabbed);
