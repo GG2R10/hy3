@@ -29,14 +29,11 @@ Hy3GroupNode::Hy3GroupNode(Hy3GroupLayout layout): layout(layout) {
 	}
 }
 
-// Adds or removes a static window tag via the same path `hyprctl dispatch
-// "hl.dsp.window.tag(...)"` would take, targeting the window by address so it
-// works regardless of focus.
+// Adds or removes a static window tag, the same way `hyprctl dispatch
+// "hl.dsp.window.tag(...)"` would, targeting by address so it works
+// regardless of focus/visibility.
 static void applyHy3Tag(PHLWINDOW window, const char* tag, bool add) {
-	if (!window) {
-		hy3_log(ERR, "[hy3tags] applyHy3Tag called with null window, tag={}", tag);
-		return;
-	}
+	if (!window) return;
 
 	auto args = std::format(
 	    "hl.dsp.window.tag({{ tag = \"{}{}\", window = \"address:0x{:x}\" }})",
@@ -46,19 +43,18 @@ static void applyHy3Tag(PHLWINDOW window, const char* tag, bool add) {
 	);
 
 	try {
-		auto result = HyprlandAPI::invokeHyprctlCommand("dispatch", args);
-		hy3_log(LOG, "[hy3tags] args=\"{}\" result=\"{}\"", args, result);
-	} catch (std::exception& e) {
-		hy3_log(ERR, "[hy3tags] applyHy3Tag threw: {}", e.what());
-	} catch (...) { hy3_log(ERR, "[hy3tags] applyHy3Tag threw a non-std exception"); }
+		HyprlandAPI::invokeHyprctlCommand("dispatch", args);
+	} catch (std::exception& e) { hy3_log(ERR, "applyHy3Tag: {}", e.what()); } catch (...) {
+		hy3_log(ERR, "applyHy3Tag: unknown exception");
+	}
 }
 
-// This runs synchronously inside window insertion/removal, which is reached
-// through Wayland protocol callbacks (libffi) that cannot tolerate a C++
-// exception unwinding through them -- any exception escaping here would
-// std::terminate the whole compositor. Everything is therefore deliberately
-// defensive: raw-pointer nullable walks instead of the throwing
-// is_root()/is_root_group()/as_group() accessors, plus a catch-all.
+// Runs synchronously inside window insertion/removal, reached through
+// Wayland protocol callbacks (libffi) that can't tolerate a C++ exception
+// unwinding through them -- an exception escaping here would std::terminate
+// the whole compositor. Kept defensive on purpose: nullable raw-pointer
+// walks instead of the throwing is_root()/is_root_group()/as_group()
+// accessors, plus a catch-all.
 void Hy3Node::syncHy3Tags() {
 	try {
 		switch (this->type()) {
@@ -71,23 +67,14 @@ void Hy3Node::syncHy3Tags() {
 				tabbed = pgroup.layout == Hy3GroupLayout::Tabbed;
 
 				// The workspace's implicit top-level split container (the
-				// default holder for windows that were never explicitly
-				// grouped) doesn't count as "grouped" -- only an explicitly
-				// created/nested group does.
+				// default holder for windows nobody explicitly grouped)
+				// doesn't count as "grouped" -- only a nested group does.
 				auto* grandparent = parent->parent.get();
 				bool parent_is_implicit_top_group = grandparent != nullptr && grandparent->is_group()
 				    && grandparent->as_group().layout == Hy3GroupLayout::Root;
 
 				grouped = pgroup.layout != Hy3GroupLayout::Root && !parent_is_implicit_top_group;
 			}
-
-			hy3_log(
-			    LOG,
-			    "[hy3tags] syncHy3Tags Target node={:x} grouped={} tabbed={}",
-			    (uintptr_t) this,
-			    grouped,
-			    tabbed
-			);
 
 			applyHy3Tag(this->as_window(), "hy3_grouped", grouped);
 			applyHy3Tag(this->as_window(), "hy3_tabbed", tabbed);
@@ -99,9 +86,9 @@ void Hy3Node::syncHy3Tags() {
 			}
 			break;
 		}
-	} catch (std::exception& e) {
-		hy3_log(ERR, "[hy3tags] syncHy3Tags threw: {}", e.what());
-	} catch (...) { hy3_log(ERR, "[hy3tags] syncHy3Tags threw a non-std exception"); }
+	} catch (std::exception& e) { hy3_log(ERR, "syncHy3Tags: {}", e.what()); } catch (...) {
+		hy3_log(ERR, "syncHy3Tags: unknown exception");
+	}
 }
 
 bool Hy3Node::is_root() { return is_group() && as_group().layout == Hy3GroupLayout::Root; }
@@ -155,6 +142,8 @@ void Hy3GroupNode::insertChild(std::list<UP<Hy3Node>>::iterator pos, UP<Hy3Node>
 	children.insert(pos, std::move(child));
 	if (ephemeral == Ephemeral::Staged && children.size() >= 2)
 		ephemeral = Ephemeral::Active;
+
+	if (auto* l = this->Hy3Node::layout()) l->markHy3TagsDirty();
 }
 
 void Hy3GroupNode::insertChild(UP<Hy3Node> child) {
@@ -178,6 +167,8 @@ UP<Hy3Node> Hy3GroupNode::extractChildRaw(std::list<UP<Hy3Node>>::iterator it) {
 	auto up = std::move(*it);
 	children.erase(it);
 	up->parent.reset();
+
+	if (auto* l = this->Hy3Node::layout()) l->markHy3TagsDirty();
 
 	return up;
 }
@@ -221,6 +212,9 @@ UP<Hy3Node> Hy3GroupNode::replaceChild(std::list<UP<Hy3Node>>::iterator it, UP<H
 	auto old = std::exchange(*it, std::move(replacement));
 	old->size_ratio = 1.0;
 	old->parent.reset();
+
+	if (auto* l = this->Hy3Node::layout()) l->markHy3TagsDirty();
+
 	return old;
 }
 
@@ -239,10 +233,17 @@ void Hy3GroupNode::collapseExpansions() {
 
 void Hy3GroupNode::setLayout(Hy3GroupLayout layout) {
 	if (layout == Hy3GroupLayout::Root) return; // root layout is immutable
+	auto was_tab = isTab();
 	this->layout = layout;
 
 	if (!isTab()) {
 		this->previous_nontab_layout = layout;
+	}
+
+	// only hy3_tabbed on direct children can change here; Hy3Node:: since
+	// the `layout` field shadows the base class method of the same name
+	if (was_tab != isTab()) {
+		if (auto* l = this->Hy3Node::layout()) l->markHy3TagsDirty();
 	}
 }
 

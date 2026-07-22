@@ -446,13 +446,20 @@ void Hy3Layout::recalcGeometry(bool no_animation) {
 	    (ma.y + ma.h) - (wa.y + wa.h),
 	}, no_animation);
 
-	// Every structural tree mutation (grouping, tabbing, collapsing,
-	// moving windows in/out of groups, ...) ends up calling recalcGeometry,
-	// making it the one reliable place to keep hy3_grouped/hy3_tabbed in
-	// sync -- unlike hooking individual tree primitives, which missed
-	// collapse/replaceChild paths.
-	this->root->syncHy3Tags();
+	// only re-sync if markHy3TagsDirty was called since the last sync, and
+	// only after recalcSizePosRecursive: window hidden-state is only correct
+	// past that point, and Hyprland's windowrule/decoration refresh silently
+	// no-ops for still-hidden windows
+	if (this->m_hy3TagsDirty) {
+		this->root->syncHy3Tags();
+		this->m_hy3TagsDirty = false;
 	}
+	}
+}
+
+void Hy3Layout::markHy3TagsDirty() {
+	static const auto tag_windows = CConfigValue<Config::INTEGER>("plugin:hy3:tag_windows");
+	if (*tag_windows) this->m_hy3TagsDirty = true;
 }
 
 ShiftDirection reverse(ShiftDirection direction) {
