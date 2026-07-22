@@ -45,47 +45,59 @@ static void applyHy3Tag(PHLWINDOW window, const char* tag, bool add) {
 	    (uintptr_t) window.get()
 	);
 
-	auto result = HyprlandAPI::invokeHyprctlCommand("dispatch", args);
-	hy3_log(LOG, "[hy3tags] args=\"{}\" result=\"{}\"", args, result);
+	try {
+		auto result = HyprlandAPI::invokeHyprctlCommand("dispatch", args);
+		hy3_log(LOG, "[hy3tags] args=\"{}\" result=\"{}\"", args, result);
+	} catch (std::exception& e) {
+		hy3_log(ERR, "[hy3tags] applyHy3Tag threw: {}", e.what());
+	} catch (...) { hy3_log(ERR, "[hy3tags] applyHy3Tag threw a non-std exception"); }
 }
 
+// This runs synchronously inside window insertion/removal, which is reached
+// through Wayland protocol callbacks (libffi) that cannot tolerate a C++
+// exception unwinding through them -- any exception escaping here would
+// std::terminate the whole compositor. Everything is therefore deliberately
+// defensive: raw-pointer nullable walks instead of the throwing
+// is_root()/is_root_group()/as_group() accessors, plus a catch-all.
 void Hy3Node::syncHy3Tags() {
-	switch (this->type()) {
-	case Hy3NodeType::Target: {
-		bool grouped = false;
-		bool tabbed = false;
-		bool has_parent = false;
+	try {
+		switch (this->type()) {
+		case Hy3NodeType::Target: {
+			bool grouped = false;
+			bool tabbed = false;
 
-		if (auto parent = this->parent.lock()) {
-			has_parent = true;
-			auto& pgroup = parent->as_group();
-			tabbed = pgroup.isTab();
-			// The workspace's implicit top-level split container (created
-			// automatically for the very first window on a workspace) does
-			// not count as a "group" from the user's perspective -- only
-			// explicitly created/nested groups do.
-			grouped = !parent->is_root() && !parent->is_root_group();
+			if (auto* parent = this->parent.get(); parent != nullptr && parent->is_group()) {
+				auto& pgroup = parent->as_group();
+				tabbed = pgroup.layout == Hy3GroupLayout::Tabbed;
+
+				auto* grandparent = parent->parent.get();
+				bool parent_is_implicit_top_group = grandparent != nullptr && grandparent->is_group()
+				    && grandparent->as_group().layout == Hy3GroupLayout::Root;
+
+				grouped = pgroup.layout != Hy3GroupLayout::Root && !parent_is_implicit_top_group;
+			}
+
+			hy3_log(
+			    LOG,
+			    "[hy3tags] syncHy3Tags Target node={:x} grouped={} tabbed={}",
+			    (uintptr_t) this,
+			    grouped,
+			    tabbed
+			);
+
+			applyHy3Tag(this->as_window(), "hy3_grouped", grouped);
+			applyHy3Tag(this->as_window(), "hy3_tabbed", tabbed);
+			break;
 		}
-
-		hy3_log(
-		    LOG,
-		    "[hy3tags] syncHy3Tags Target node={:x} has_parent={} grouped={} tabbed={}",
-		    (uintptr_t) this,
-		    has_parent,
-		    grouped,
-		    tabbed
-		);
-
-		applyHy3Tag(this->as_window(), "hy3_grouped", grouped);
-		applyHy3Tag(this->as_window(), "hy3_tabbed", tabbed);
-		break;
-	}
-	case Hy3NodeType::Group:
-		for (auto& child: this->as_group().children) {
-			child->syncHy3Tags();
+		case Hy3NodeType::Group:
+			for (auto& child: this->as_group().children) {
+				child->syncHy3Tags();
+			}
+			break;
 		}
-		break;
-	}
+	} catch (std::exception& e) {
+		hy3_log(ERR, "[hy3tags] syncHy3Tags threw: {}", e.what());
+	} catch (...) { hy3_log(ERR, "[hy3tags] syncHy3Tags threw a non-std exception"); }
 }
 
 bool Hy3Node::is_root() { return is_group() && as_group().layout == Hy3GroupLayout::Root; }
