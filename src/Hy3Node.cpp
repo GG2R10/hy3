@@ -70,6 +70,10 @@ void Hy3Node::syncHy3Tags() {
 				auto& pgroup = parent->as_group();
 				tabbed = pgroup.layout == Hy3GroupLayout::Tabbed;
 
+				// The workspace's implicit top-level split container (the
+				// default holder for windows that were never explicitly
+				// grouped) doesn't count as "grouped" -- only an explicitly
+				// created/nested group does.
 				auto* grandparent = parent->parent.get();
 				bool parent_is_implicit_top_group = grandparent != nullptr && grandparent->is_group()
 				    && grandparent->as_group().layout == Hy3GroupLayout::Root;
@@ -148,14 +152,9 @@ auto Hy3GroupNode::findChild(Hy3Node& child) -> std::list<UP<Hy3Node>>::iterator
 void Hy3GroupNode::insertChild(std::list<UP<Hy3Node>>::iterator pos, UP<Hy3Node> child) {
 	child->parent = this->self;
 	if (focused_child == nullptr) focused_child = child.get();
-	auto* child_ptr = child.get();
 	children.insert(pos, std::move(child));
 	if (ephemeral == Ephemeral::Staged && children.size() >= 2)
 		ephemeral = Ephemeral::Active;
-
-	// Covers membership changes into a group whose layout doesn't itself
-	// change (e.g. dropping a 3rd window into an already-tabbed group).
-	child_ptr->syncHy3Tags();
 }
 
 void Hy3GroupNode::insertChild(UP<Hy3Node> child) {
@@ -179,10 +178,6 @@ UP<Hy3Node> Hy3GroupNode::extractChildRaw(std::list<UP<Hy3Node>>::iterator it) {
 	auto up = std::move(*it);
 	children.erase(it);
 	up->parent.reset();
-
-	// The node is now detached (ungrouped/untabbed by definition). If the
-	// caller reinserts it elsewhere, that insertChild() call will resync.
-	up->syncHy3Tags();
 
 	return up;
 }
@@ -244,17 +239,11 @@ void Hy3GroupNode::collapseExpansions() {
 
 void Hy3GroupNode::setLayout(Hy3GroupLayout layout) {
 	if (layout == Hy3GroupLayout::Root) return; // root layout is immutable
-	auto was_tab = isTab();
 	this->layout = layout;
 
 	if (!isTab()) {
 		this->previous_nontab_layout = layout;
 	}
-
-	// A layout change here can flip `hy3_tabbed` (and, for the implicit
-	// top-level group specifically, `hy3_grouped`) for every descendant, not
-	// just direct children.
-	if (was_tab != isTab()) this->syncHy3Tags();
 }
 
 void Hy3GroupNode::setEphemeral(GroupEphemeralityOption ephemeral) {

@@ -445,6 +445,13 @@ void Hy3Layout::recalcGeometry(bool no_animation) {
 	    (ma.x + ma.w) - (wa.x + wa.w),
 	    (ma.y + ma.h) - (wa.y + wa.h),
 	}, no_animation);
+
+	// Every structural tree mutation (grouping, tabbing, collapsing,
+	// moving windows in/out of groups, ...) ends up calling recalcGeometry,
+	// making it the one reliable place to keep hy3_grouped/hy3_tabbed in
+	// sync -- unlike hooking individual tree primitives, which missed
+	// collapse/replaceChild paths.
+	this->root->syncHy3Tags();
 	}
 }
 
