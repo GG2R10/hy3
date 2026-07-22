@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <format>
 #include <sstream>
 #include <stdexcept>
 
@@ -25,6 +26,50 @@ const float MIN_RATIO = 0.0f;
 Hy3GroupNode::Hy3GroupNode(Hy3GroupLayout layout): layout(layout) {
 	if (!isTab()) {
 		this->previous_nontab_layout = layout;
+	}
+}
+
+// Adds or removes a static window tag via the same path `hyprctl dispatch
+// "hl.dsp.window.tag(...)"` would take, targeting the window by address so it
+// works regardless of focus.
+static void applyHy3Tag(PHLWINDOW window, const char* tag, bool add) {
+	if (!window) return;
+
+	auto args = std::format(
+	    "hl.dsp.window.tag({{ tag = \"{}{}\", window = \"address:0x{:x}\" }})",
+	    add ? '+' : '-',
+	    tag,
+	    (uintptr_t) window.get()
+	);
+
+	HyprlandAPI::invokeHyprctlCommand("dispatch", args);
+}
+
+void Hy3Node::syncHy3Tags() {
+	switch (this->type()) {
+	case Hy3NodeType::Target: {
+		bool grouped = false;
+		bool tabbed = false;
+
+		if (auto parent = this->parent.lock()) {
+			auto& pgroup = parent->as_group();
+			tabbed = pgroup.isTab();
+			// The workspace's implicit top-level split container (created
+			// automatically for the very first window on a workspace) does
+			// not count as a "group" from the user's perspective -- only
+			// explicitly created/nested groups do.
+			grouped = !parent->is_root() && !parent->is_root_group();
+		}
+
+		applyHy3Tag(this->as_window(), "hy3_grouped", grouped);
+		applyHy3Tag(this->as_window(), "hy3_tabbed", tabbed);
+		break;
+	}
+	case Hy3NodeType::Group:
+		for (auto& child: this->as_group().children) {
+			child->syncHy3Tags();
+		}
+		break;
 	}
 }
 
@@ -76,9 +121,14 @@ auto Hy3GroupNode::findChild(Hy3Node& child) -> std::list<UP<Hy3Node>>::iterator
 void Hy3GroupNode::insertChild(std::list<UP<Hy3Node>>::iterator pos, UP<Hy3Node> child) {
 	child->parent = this->self;
 	if (focused_child == nullptr) focused_child = child.get();
+	auto* child_ptr = child.get();
 	children.insert(pos, std::move(child));
 	if (ephemeral == Ephemeral::Staged && children.size() >= 2)
 		ephemeral = Ephemeral::Active;
+
+	// Covers membership changes into a group whose layout doesn't itself
+	// change (e.g. dropping a 3rd window into an already-tabbed group).
+	child_ptr->syncHy3Tags();
 }
 
 void Hy3GroupNode::insertChild(UP<Hy3Node> child) {
@@ -102,6 +152,11 @@ UP<Hy3Node> Hy3GroupNode::extractChildRaw(std::list<UP<Hy3Node>>::iterator it) {
 	auto up = std::move(*it);
 	children.erase(it);
 	up->parent.reset();
+
+	// The node is now detached (ungrouped/untabbed by definition). If the
+	// caller reinserts it elsewhere, that insertChild() call will resync.
+	up->syncHy3Tags();
+
 	return up;
 }
 
@@ -162,11 +217,17 @@ void Hy3GroupNode::collapseExpansions() {
 
 void Hy3GroupNode::setLayout(Hy3GroupLayout layout) {
 	if (layout == Hy3GroupLayout::Root) return; // root layout is immutable
+	auto was_tab = isTab();
 	this->layout = layout;
 
 	if (!isTab()) {
 		this->previous_nontab_layout = layout;
 	}
+
+	// A layout change here can flip `hy3_tabbed` (and, for the implicit
+	// top-level group specifically, `hy3_grouped`) for every descendant, not
+	// just direct children.
+	if (was_tab != isTab()) this->syncHy3Tags();
 }
 
 void Hy3GroupNode::setEphemeral(GroupEphemeralityOption ephemeral) {
