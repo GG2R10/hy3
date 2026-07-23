@@ -32,9 +32,7 @@ Hy3GroupNode::Hy3GroupNode(Hy3GroupLayout layout): layout(layout) {
 // Adds or removes a static window tag, the same way `hyprctl dispatch
 // "hl.dsp.window.tag(...)"` would, targeting by address so it works
 // regardless of focus/visibility.
-static void applyHy3Tag(PHLWINDOW window, const char* tag, bool add) {
-	if (!window) return;
-
+static void dispatchHy3Tag(PHLWINDOW window, const char* tag, bool add) {
 	auto args = std::format(
 	    "hl.dsp.window.tag({{ tag = \"{}{}\", window = \"address:0x{:x}\" }})",
 	    add ? '+' : '-',
@@ -44,9 +42,23 @@ static void applyHy3Tag(PHLWINDOW window, const char* tag, bool add) {
 
 	try {
 		HyprlandAPI::invokeHyprctlCommand("dispatch", args);
-	} catch (std::exception& e) { hy3_log(ERR, "applyHy3Tag: {}", e.what()); } catch (...) {
-		hy3_log(ERR, "applyHy3Tag: unknown exception");
+	} catch (std::exception& e) { hy3_log(ERR, "dispatchHy3Tag: {}", e.what()); } catch (...) {
+		hy3_log(ERR, "dispatchHy3Tag: unknown exception");
 	}
+}
+
+// Hyprland's CTagKeeper::applyTag (and, in turn, Actions::tag) only fires
+// CWindowRuleApplicator::propertiesChanged -- the thing that actually
+// re-applies tag-matched windowrules -- when the tag's value actually
+// changes. Every resync of an already-formed, unchanged group (e.g.
+// switching which tab is visible) re-asserts the same value on every
+// member, which Hyprland then silently no-ops. Force a real change by
+// clearing the tag first when we want it set, so windowrules always get
+// re-evaluated regardless of whether the value itself moved.
+static void applyHy3Tag(PHLWINDOW window, const char* tag, bool add) {
+	if (!window) return;
+	if (add) dispatchHy3Tag(window, tag, false);
+	dispatchHy3Tag(window, tag, add);
 }
 
 // Runs synchronously inside window insertion/removal, reached through
