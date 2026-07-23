@@ -321,7 +321,15 @@ void Hy3Node::focus(bool warp, Desktop::eFocusReason reason) {
 	switch (this->type()) {
 	case Hy3NodeType::Target: {
 		auto window = this->as_window();
+		bool was_hidden = window->isHidden();
 		window->setHidden(false);
+
+		// Switching to a different tab in an already-formed group calls
+		// this directly and never reaches recalcSizePosRecursive's own
+		// hidden->visible check below -- setHidden(false) above already
+		// makes isHidden() lie about the transition by the time that runs.
+		if (was_hidden) this->syncHy3Tags();
+
 		Desktop::focusState()->fullWindowFocus(window, reason);
 		if (warp) Hy3Layout::warpCursorToBox(window->m_reportedPosition, window->m_reportedSize);
 		break;
@@ -427,13 +435,12 @@ void Hy3Node::recalcSizePosRecursive(CBox offsets, bool no_animation) {
 		window->setHidden(this->hidden);
 
 		// Hyprland's windowrule/decoration refresh (triggered by our tag
-		// dispatch elsewhere) silently no-ops for hidden windows, so a
-		// window that only becomes visible via a plain tab switch (no tree
-		// mutation, nothing else re-syncs tags for it) would otherwise never
-		// get hy3_grouped/hy3_tabbed-driven rules re-applied. Re-firing just
-		// for this one node on the hidden->visible edge is cheap: it's only
-		// ever a couple of nodes per tab switch, and this check itself is a
-		// bool compare we're already paying to reach setHidden above.
+		// dispatch elsewhere) silently no-ops for hidden windows, so any node
+		// that goes hidden->visible needs a re-sync. This specifically
+		// catches windows that become visible without ever having focus()
+		// called directly on them -- e.g. every sibling but the target
+		// becoming visible on untab. See Hy3Node::focus() for the other
+		// half: it sets hidden false eagerly, before this ever runs.
 		if (was_hidden && !this->hidden) this->syncHy3Tags();
 
 		this->as_target()->setPositionGlobal({.logicalBox = this->logicalBox, .visualBox = this->visualBox});
