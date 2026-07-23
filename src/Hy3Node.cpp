@@ -29,91 +29,6 @@ Hy3GroupNode::Hy3GroupNode(Hy3GroupLayout layout): layout(layout) {
 	}
 }
 
-// Adds or removes a static window tag, the same way `hyprctl dispatch
-// "hl.dsp.window.tag(...)"` would, targeting by address so it works
-// regardless of focus/visibility.
-static void dispatchHy3Tag(PHLWINDOW window, const char* tag, bool add) {
-	auto args = std::format(
-	    "hl.dsp.window.tag({{ tag = \"{}{}\", window = \"address:0x{:x}\" }})",
-	    add ? '+' : '-',
-	    tag,
-	    (uintptr_t) window.get()
-	);
-
-	try {
-		HyprlandAPI::invokeHyprctlCommand("dispatch", args);
-	} catch (std::exception& e) { hy3_log(ERR, "dispatchHy3Tag: {}", e.what()); } catch (...) {
-		hy3_log(ERR, "dispatchHy3Tag: unknown exception");
-	}
-}
-
-// Hyprland's CTagKeeper::applyTag (and, in turn, Actions::tag) only fires
-// CWindowRuleApplicator::propertiesChanged -- the thing that actually
-// re-applies tag-matched windowrules -- when the tag's value actually
-// changes. Every resync of an already-formed, unchanged group (e.g.
-// switching which tab is visible) re-asserts the same value on every
-// member, which Hyprland then silently no-ops. Force a real change by
-// clearing the tag first when we want it set, so windowrules always get
-// re-evaluated regardless of whether the value itself moved.
-static void applyHy3Tag(PHLWINDOW window, const char* tag, bool add) {
-	if (!window) return;
-	// Force the opposite state first, unconditionally, in both directions:
-	// an earlier sync call that landed while this window was still hidden
-	// (and so got silently ignored by propertiesChanged, see below) can
-	// leave the tag already at the value we're about to ask for again --
-	// which Hyprland's own "did this actually change" check would then
-	// also treat as a no-op, even though *this* call is the first one
-	// happening while the window is actually visible.
-	dispatchHy3Tag(window, tag, !add);
-	dispatchHy3Tag(window, tag, add);
-}
-
-// Runs synchronously inside window insertion/removal, reached through
-// Wayland protocol callbacks (libffi) that can't tolerate a C++ exception
-// unwinding through them -- an exception escaping here would std::terminate
-// the whole compositor. Kept defensive on purpose: nullable raw-pointer
-// walks instead of the throwing is_root()/is_root_group()/as_group()
-// accessors, plus a catch-all. The plugin:hy3:tag_windows check lives here,
-// not at each call site, so every caller gets a free no-op when it's off.
-void Hy3Node::syncHy3Tags() {
-	static const auto tag_windows = CConfigValue<Config::INTEGER>("plugin:hy3:tag_windows");
-	if (!*tag_windows) return;
-
-	try {
-		switch (this->type()) {
-		case Hy3NodeType::Target: {
-			bool grouped = false;
-			bool tabbed = false;
-
-			if (auto* parent = this->parent.get(); parent != nullptr && parent->is_group()) {
-				auto& pgroup = parent->as_group();
-				tabbed = pgroup.layout == Hy3GroupLayout::Tabbed;
-
-				// The workspace's implicit top-level split container (the
-				// default holder for windows nobody explicitly grouped)
-				// doesn't count as "grouped" -- only a nested group does.
-				auto* grandparent = parent->parent.get();
-				bool parent_is_implicit_top_group = grandparent != nullptr && grandparent->is_group()
-				    && grandparent->as_group().layout == Hy3GroupLayout::Root;
-
-				grouped = pgroup.layout != Hy3GroupLayout::Root && !parent_is_implicit_top_group;
-			}
-
-			applyHy3Tag(this->as_window(), "hy3_grouped", grouped);
-			applyHy3Tag(this->as_window(), "hy3_tabbed", tabbed);
-			break;
-		}
-		case Hy3NodeType::Group:
-			for (auto& child: this->as_group().children) {
-				child->syncHy3Tags();
-			}
-			break;
-		}
-	} catch (std::exception& e) { hy3_log(ERR, "syncHy3Tags: {}", e.what()); } catch (...) {
-		hy3_log(ERR, "syncHy3Tags: unknown exception");
-	}
-}
-
 bool Hy3Node::is_root() { return is_group() && as_group().layout == Hy3GroupLayout::Root; }
 bool Hy3Node::is_root_group() { return !is_root() && parent->is_root(); }
 
@@ -157,6 +72,79 @@ auto Hy3GroupNode::findChild(Hy3Node& child) -> std::list<UP<Hy3Node>>::iterator
 		if (it->get() == &child) return it;
 	}
 	return children.end();
+}
+
+// Sets/unsets a static tag on `window`, addressed directly so it works
+// regardless of hidden/focus state.
+static void dispatchHy3Tag(PHLWINDOW window, const char* tag, bool add) {
+	auto args = std::format(
+	    "hl.dsp.window.tag({{ tag = \"{}{}\", window = \"address:0x{:x}\" }})",
+	    add ? '+' : '-',
+	    tag,
+	    (uintptr_t) window.get()
+	);
+
+	try {
+		HyprlandAPI::invokeHyprctlCommand("dispatch", args);
+	} catch (std::exception& e) { hy3_log(ERR, "dispatchHy3Tag: {}", e.what()); } catch (...) {
+		hy3_log(ERR, "dispatchHy3Tag: unknown exception");
+	}
+}
+
+// Hyprland only re-evaluates windowrules on a tag change if the tag's
+// value actually moved (see CTagKeeper::applyTag / Actions::tag), so
+// re-syncing an already-correctly-tagged window (e.g. the group's shape
+// didn't change, just which tab is visible) would otherwise be a silent
+// no-op. Force a real transition by toggling through the opposite state.
+static void applyHy3Tag(PHLWINDOW window, const char* tag, bool add) {
+	if (!window) return;
+	dispatchHy3Tag(window, tag, !add);
+	dispatchHy3Tag(window, tag, add);
+}
+
+// Runs inside window insertion/removal, reached through Wayland protocol
+// callbacks that can't tolerate a C++ exception escaping (it would
+// std::terminate the compositor) -- kept deliberately defensive: nullable
+// pointer walks instead of the throwing accessors, plus a catch-all.
+// plugin:hy3:tag_windows is checked here rather than per call site, so
+// every caller no-ops for free when it's off.
+void Hy3Node::syncHy3Tags() {
+	static const auto tag_windows = CConfigValue<Config::INTEGER>("plugin:hy3:tag_windows");
+	if (!*tag_windows) return;
+
+	try {
+		switch (this->type()) {
+		case Hy3NodeType::Target: {
+			bool grouped = false;
+			bool tabbed = false;
+
+			if (auto* parent = this->parent.get(); parent != nullptr && parent->is_group()) {
+				auto& pgroup = parent->as_group();
+				tabbed = pgroup.layout == Hy3GroupLayout::Tabbed;
+
+				// The workspace's implicit top-level split container (the
+				// default holder for windows nobody explicitly grouped)
+				// doesn't count as "grouped" -- only a nested group does.
+				auto* grandparent = parent->parent.get();
+				bool parent_is_implicit_top_group = grandparent != nullptr && grandparent->is_group()
+				    && grandparent->as_group().layout == Hy3GroupLayout::Root;
+
+				grouped = pgroup.layout != Hy3GroupLayout::Root && !parent_is_implicit_top_group;
+			}
+
+			applyHy3Tag(this->as_window(), "hy3_grouped", grouped);
+			applyHy3Tag(this->as_window(), "hy3_tabbed", tabbed);
+			break;
+		}
+		case Hy3NodeType::Group:
+			for (auto& child: this->as_group().children) {
+				child->syncHy3Tags();
+			}
+			break;
+		}
+	} catch (std::exception& e) { hy3_log(ERR, "syncHy3Tags: {}", e.what()); } catch (...) {
+		hy3_log(ERR, "syncHy3Tags: unknown exception");
+	}
 }
 
 void Hy3GroupNode::insertChild(std::list<UP<Hy3Node>>::iterator pos, UP<Hy3Node> child) {
@@ -355,14 +343,11 @@ void Hy3Node::focus(bool warp, Desktop::eFocusReason reason) {
 		bool was_hidden = window->isHidden();
 		window->setHidden(false);
 
-		// Switching to a different tab in an already-formed group calls
-		// this directly and never reaches recalcSizePosRecursive's own
-		// hidden->visible check below -- setHidden(false) above already
-		// makes isHidden() lie about the transition by the time that runs.
-		// Doing this here, before recalcGeometry() computes this window's
-		// actual position/size, avoids a visible resize bounce from the
-		// bar being removed a frame after the window already got shown at
-		// its old (with-bar) size.
+		// Tab-switching calls this directly and skips recalcSizePosRecursive's
+		// own hidden->visible check (setHidden(false) above already makes
+		// isHidden() lie about the transition by then). Syncing before
+		// recalcGeometry() computes this window's position avoids a visible
+		// resize bounce from the bar disappearing a frame late.
 		if (was_hidden) this->syncHy3Tags();
 
 		Desktop::focusState()->fullWindowFocus(window, reason);
@@ -469,12 +454,10 @@ void Hy3Node::recalcSizePosRecursive(CBox offsets, bool no_animation) {
 		bool was_hidden = window->isHidden();
 		window->setHidden(this->hidden);
 
-		// Catches windows that become visible without focus() ever being
-		// called on them directly -- e.g. every sibling but the target
-		// becoming visible on untab. See Hy3Node::focus() for the other
-		// half. Doing this before setPositionGlobal below, not after the
-		// whole tree finishes, avoids a visible resize bounce (bar removed
-		// a frame after the window was already shown at its old size).
+		// Catches windows becoming visible without focus() being called on
+		// them directly (e.g. siblings on untab). See Hy3Node::focus() for
+		// the other half; same reasoning for doing this before
+		// setPositionGlobal below instead of after the whole tree finishes.
 		if (was_hidden && !this->hidden) this->syncHy3Tags();
 
 		this->as_target()->setPositionGlobal({.logicalBox = this->logicalBox, .visualBox = this->visualBox});
