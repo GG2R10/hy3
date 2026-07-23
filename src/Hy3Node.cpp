@@ -54,8 +54,12 @@ static void applyHy3Tag(PHLWINDOW window, const char* tag, bool add) {
 // unwinding through them -- an exception escaping here would std::terminate
 // the whole compositor. Kept defensive on purpose: nullable raw-pointer
 // walks instead of the throwing is_root()/is_root_group()/as_group()
-// accessors, plus a catch-all.
+// accessors, plus a catch-all. The plugin:hy3:tag_windows check lives here,
+// not at each call site, so every caller gets a free no-op when it's off.
 void Hy3Node::syncHy3Tags() {
+	static const auto tag_windows = CConfigValue<Config::INTEGER>("plugin:hy3:tag_windows");
+	if (!*tag_windows) return;
+
 	try {
 		switch (this->type()) {
 		case Hy3NodeType::Target: {
@@ -418,7 +422,20 @@ void Hy3Node::recalcSizePosRecursive(CBox offsets, bool no_animation) {
 
 	// Keep in sync with WindowTarget::updatePos
 	if (this->is_target()) {
-		this->as_window()->setHidden(this->hidden);
+		auto window = this->as_window();
+		bool was_hidden = window->isHidden();
+		window->setHidden(this->hidden);
+
+		// Hyprland's windowrule/decoration refresh (triggered by our tag
+		// dispatch elsewhere) silently no-ops for hidden windows, so a
+		// window that only becomes visible via a plain tab switch (no tree
+		// mutation, nothing else re-syncs tags for it) would otherwise never
+		// get hy3_grouped/hy3_tabbed-driven rules re-applied. Re-firing just
+		// for this one node on the hidden->visible edge is cheap: it's only
+		// ever a couple of nodes per tab switch, and this check itself is a
+		// bool compare we're already paying to reach setHidden above.
+		if (was_hidden && !this->hidden) this->syncHy3Tags();
+
 		this->as_target()->setPositionGlobal({.logicalBox = this->logicalBox, .visualBox = this->visualBox});
 		// warp on hidden fixes bounding boxes for the tab click handler
 		if (no_animation || this->hidden) this->as_target()->warpPositionSize();
