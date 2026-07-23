@@ -57,7 +57,14 @@ static void dispatchHy3Tag(PHLWINDOW window, const char* tag, bool add) {
 // re-evaluated regardless of whether the value itself moved.
 static void applyHy3Tag(PHLWINDOW window, const char* tag, bool add) {
 	if (!window) return;
-	if (add) dispatchHy3Tag(window, tag, false);
+	// Force the opposite state first, unconditionally, in both directions:
+	// an earlier sync call that landed while this window was still hidden
+	// (and so got silently ignored by propertiesChanged, see below) can
+	// leave the tag already at the value we're about to ask for again --
+	// which Hyprland's own "did this actually change" check would then
+	// also treat as a no-op, even though *this* call is the first one
+	// happening while the window is actually visible.
+	dispatchHy3Tag(window, tag, !add);
 	dispatchHy3Tag(window, tag, add);
 }
 
