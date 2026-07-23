@@ -155,11 +155,16 @@ auto Hy3GroupNode::findChild(Hy3Node& child) -> std::list<UP<Hy3Node>>::iterator
 void Hy3GroupNode::insertChild(std::list<UP<Hy3Node>>::iterator pos, UP<Hy3Node> child) {
 	child->parent = this->self;
 	if (focused_child == nullptr) focused_child = child.get();
+	auto* child_ptr = child.get();
 	children.insert(pos, std::move(child));
 	if (ephemeral == Ephemeral::Staged && children.size() >= 2)
 		ephemeral = Ephemeral::Active;
 
-	if (auto* l = this->Hy3Node::layout()) l->markHy3TagsDirty();
+	// Immediate, not deferred: for a window that's already visible (the
+	// common case for e.g. wrapping the focused window into a new group),
+	// this needs to happen before recalcGeometry computes its position, or
+	// the bar removal lands a frame late and the window visibly bounces.
+	child_ptr->syncHy3Tags();
 }
 
 void Hy3GroupNode::insertChild(UP<Hy3Node> child) {
@@ -184,7 +189,8 @@ UP<Hy3Node> Hy3GroupNode::extractChildRaw(std::list<UP<Hy3Node>>::iterator it) {
 	children.erase(it);
 	up->parent.reset();
 
-	if (auto* l = this->Hy3Node::layout()) l->markHy3TagsDirty();
+	// See insertChild for why this is immediate rather than deferred.
+	up->syncHy3Tags();
 
 	return up;
 }
@@ -225,11 +231,14 @@ UP<Hy3Node> Hy3GroupNode::replaceChild(std::list<UP<Hy3Node>>::iterator it, UP<H
 	replacement->parent = this->self;
 	replacement->size_ratio = (*it)->size_ratio;
 	if (focused_child == it->get()) focused_child = replacement.get();
+	auto* replacement_ptr = replacement.get();
 	auto old = std::exchange(*it, std::move(replacement));
 	old->size_ratio = 1.0;
 	old->parent.reset();
 
-	if (auto* l = this->Hy3Node::layout()) l->markHy3TagsDirty();
+	// See insertChild for why this is immediate rather than deferred.
+	replacement_ptr->syncHy3Tags();
+	old->syncHy3Tags();
 
 	return old;
 }
@@ -256,10 +265,13 @@ void Hy3GroupNode::setLayout(Hy3GroupLayout layout) {
 		this->previous_nontab_layout = layout;
 	}
 
-	// only hy3_tabbed on direct children can change here; Hy3Node:: since
-	// the `layout` field shadows the base class method of the same name
+	// Only hy3_tabbed on direct children can change here (hy3_grouped
+	// depends on parent/grandparent structure, which this doesn't touch).
+	// Immediate, not deferred: see insertChild for why.
 	if (was_tab != isTab()) {
-		if (auto* l = this->Hy3Node::layout()) l->markHy3TagsDirty();
+		for (auto& child: this->children) {
+			child->syncHy3Tags();
+		}
 	}
 }
 

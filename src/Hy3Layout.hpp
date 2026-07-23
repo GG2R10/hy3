@@ -121,16 +121,6 @@ public:
 	void onWindowFocusChange(PHLWINDOW window);
 	void updateGroupBorderColors();
 
-	// Called by the tree-mutation primitives (Hy3GroupNode::insertChild,
-	// extractChildRaw, replaceChild, setLayout) when something that could
-	// affect hy3_grouped/hy3_tabbed changed structurally, as opposed to a
-	// window merely becoming hidden/visible (see the was_hidden checks in
-	// Hy3Node::focus() and recalcSizePosRecursive for that half). No-op if
-	// plugin:hy3:tag_windows is off. recalcGeometry() re-syncs the whole
-	// tree once this is set, keeping pure focus/geometry recalcs free of
-	// any tag work.
-	void markHy3TagsDirty();
-
 	void makeGroupOnWorkspace(
 	    const CWorkspace* workspace,
 	    Hy3GroupLayout,
@@ -203,8 +193,6 @@ private:
 
 	void updateAutotileWorkspaces();
 	bool shouldAutotileWorkspace(const CWorkspace* workspace);
-
-	bool m_hy3TagsDirty = false;
 
 	// Per-instance event listeners
 	CHyprSignalListener m_windowActiveListener;
