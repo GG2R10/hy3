@@ -146,8 +146,6 @@ void Hy3GroupNode::insertChild(std::list<UP<Hy3Node>>::iterator pos, UP<Hy3Node>
 	children.insert(pos, std::move(child));
 	if (ephemeral == Ephemeral::Staged && children.size() >= 2)
 		ephemeral = Ephemeral::Active;
-
-	if (auto* l = this->Hy3Node::layout()) l->markHy3TagsDirty();
 }
 
 void Hy3GroupNode::insertChild(UP<Hy3Node> child) {
@@ -171,9 +169,6 @@ UP<Hy3Node> Hy3GroupNode::extractChildRaw(std::list<UP<Hy3Node>>::iterator it) {
 	auto up = std::move(*it);
 	children.erase(it);
 	up->parent.reset();
-
-	if (auto* l = this->Hy3Node::layout()) l->markHy3TagsDirty();
-
 	return up;
 }
 
@@ -216,9 +211,6 @@ UP<Hy3Node> Hy3GroupNode::replaceChild(std::list<UP<Hy3Node>>::iterator it, UP<H
 	auto old = std::exchange(*it, std::move(replacement));
 	old->size_ratio = 1.0;
 	old->parent.reset();
-
-	if (auto* l = this->Hy3Node::layout()) l->markHy3TagsDirty();
-
 	return old;
 }
 
@@ -237,17 +229,10 @@ void Hy3GroupNode::collapseExpansions() {
 
 void Hy3GroupNode::setLayout(Hy3GroupLayout layout) {
 	if (layout == Hy3GroupLayout::Root) return; // root layout is immutable
-	auto was_tab = isTab();
 	this->layout = layout;
 
 	if (!isTab()) {
 		this->previous_nontab_layout = layout;
-	}
-
-	// only hy3_tabbed on direct children can change here; Hy3Node:: since
-	// the `layout` field shadows the base class method of the same name
-	if (was_tab != isTab()) {
-		if (auto* l = this->Hy3Node::layout()) l->markHy3TagsDirty();
 	}
 }
 
@@ -321,15 +306,7 @@ void Hy3Node::focus(bool warp, Desktop::eFocusReason reason) {
 	switch (this->type()) {
 	case Hy3NodeType::Target: {
 		auto window = this->as_window();
-		bool was_hidden = window->isHidden();
 		window->setHidden(false);
-
-		// Switching to a different tab in an already-formed group calls
-		// this directly and never reaches recalcSizePosRecursive's own
-		// hidden->visible check below -- setHidden(false) above already
-		// makes isHidden() lie about the transition by the time that runs.
-		if (was_hidden) this->syncHy3Tags();
-
 		Desktop::focusState()->fullWindowFocus(window, reason);
 		if (warp) Hy3Layout::warpCursorToBox(window->m_reportedPosition, window->m_reportedSize);
 		break;
@@ -430,19 +407,7 @@ void Hy3Node::recalcSizePosRecursive(CBox offsets, bool no_animation) {
 
 	// Keep in sync with WindowTarget::updatePos
 	if (this->is_target()) {
-		auto window = this->as_window();
-		bool was_hidden = window->isHidden();
-		window->setHidden(this->hidden);
-
-		// Hyprland's windowrule/decoration refresh (triggered by our tag
-		// dispatch elsewhere) silently no-ops for hidden windows, so any node
-		// that goes hidden->visible needs a re-sync. This specifically
-		// catches windows that become visible without ever having focus()
-		// called directly on them -- e.g. every sibling but the target
-		// becoming visible on untab. See Hy3Node::focus() for the other
-		// half: it sets hidden false eagerly, before this ever runs.
-		if (was_hidden && !this->hidden) this->syncHy3Tags();
-
+		this->as_window()->setHidden(this->hidden);
 		this->as_target()->setPositionGlobal({.logicalBox = this->logicalBox, .visualBox = this->visualBox});
 		// warp on hidden fixes bounding boxes for the tab click handler
 		if (no_animation || this->hidden) this->as_target()->warpPositionSize();
