@@ -446,15 +446,25 @@ void Hy3Layout::recalcGeometry(bool no_animation) {
 	    (ma.y + ma.h) - (wa.y + wa.h),
 	}, no_animation);
 
-	// Every structural mutation and every focus change (tab switches
-	// included) ends up here, always after hidden-state has settled -- the
-	// one reliable place to keep hy3_grouped/hy3_tabbed in sync. Hooking
-	// individual tree primitives instead missed collapse/replaceChild paths
-	// and switching tabs within an already-formed group (see git log for
-	// the two failed attempts). syncHy3Tags() itself no-ops for the whole
-	// tree in one CConfigValue read if plugin:hy3:tag_windows is off.
-	this->root->syncHy3Tags();
+	// Catches tag/rule changes from a structural mutation that didn't also
+	// flip any window's hidden state (e.g. wrapping an already-visible
+	// window into a new nested group) -- markHy3TagsDirty() callers. The
+	// much more common hidden<->visible case (tab switches, untab, ...) is
+	// instead handled inline, per-window, right where it happens (see
+	// Hy3Node::focus() and the top of this function's is_target() branch
+	// above): re-syncing there specifically -- before that window's own
+	// geometry/position gets computed -- avoids a visible resize bounce
+	// that doing this same full-tree pass unconditionally caused.
+	if (this->m_hy3TagsDirty) {
+		this->root->syncHy3Tags();
+		this->m_hy3TagsDirty = false;
 	}
+	}
+}
+
+void Hy3Layout::markHy3TagsDirty() {
+	static const auto tag_windows = CConfigValue<Config::INTEGER>("plugin:hy3:tag_windows");
+	if (*tag_windows) this->m_hy3TagsDirty = true;
 }
 
 ShiftDirection reverse(ShiftDirection direction) {
